@@ -1,6 +1,6 @@
 # EasyOats Order Manager
 
-An Arabic, right-to-left local order manager for EasyOats. SQLite is the source of truth; the supplied Excel workbook is an automatically synchronized operational report. The interface covers orders, customer history, delivery, collection, inventory, feedback, and export.
+An Arabic, right-to-left order manager for EasyOats. The database is the source of truth—SQLite locally and PostgreSQL when hosted—and the supplied Excel workbook is a synchronized operational report. The interface covers orders, customer history, delivery, collection, inventory, feedback, and export.
 
 The project also includes a production multi-user path using managed PostgreSQL, Google/Microsoft OIDC sign-in, staff/admin roles, versioned migrations, and durable hosted Excel storage. Follow [DEPLOYMENT.md](DEPLOYMENT.md) for the exact cutover procedure.
 
@@ -37,9 +37,11 @@ The server binds to `127.0.0.1` by default. This MVP is for a trusted local team
 
 All successful changes are committed to the database before export. When Excel is open and blocks saving, the order is still saved. Close Excel and click **إعادة محاولة مزامنة Excel**. Settings also offers an immediate full export, the last successful sync time, and a workbook download.
 
+Administrators can also update existing orders through Excel. Download the latest workbook from **الإعدادات والتصدير → Excel والتصدير**, edit rows in **الطلبات**, and upload the workbook in the import section. The app validates the file, rejects stale copies and changed order IDs, previews every change, requires an audit reason, and applies the approved changes in one transaction. New orders, inventory adjustments, settings, and calculated columns must be managed in the app.
+
 ## Data, workbook preservation, and recovery
 
-- Default database: `data/easyoats.db`. Do not manually edit the workbook to change application records; the next export rebuilds the report from the database.
+- Default database: `data/easyoats.db`. Workbook edits affect application records only through the administrator import flow. Directly replacing the operational workbook does not update the database.
 - Operational report: `EasyOats_Order_Tracker.xlsx`.
 - Before its first write, the exporter preserves an untouched original in `backups/original_template.xlsx`. Every export also creates a timestamped backup before replacing the report.
 - The exporter saves in the workbook directory, then atomically replaces the destination. An export lock serializes concurrent exports. A failed export leaves the prior workbook intact and persists pending status for retry.
@@ -82,7 +84,7 @@ PostgreSQL uses the same SQLAlchemy models and services. Use `scripts/migrate_sq
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-Tests cover phone normalization/search, pricing and payments, stock reservation/cancellation/returns, unique concurrent order creation, audit records, validation, feedback, workbook formulas and values, backups, atomic failures, and export capacity beyond 200 orders. Tests use isolated temporary databases and workbook copies.
+Tests cover phone normalization/search, pricing and payments, stock reservation/cancellation/returns, unique concurrent order creation, audit records, validation, feedback, workbook formulas and values, guarded Excel import, backups, atomic failures, and export capacity beyond 200 orders. Tests use isolated temporary databases and workbook copies.
 
 `requirements.txt` lists supported direct dependencies; `requirements-lock.txt` records the installed, verified environment. Streamlit's official [AppTest documentation](https://docs.streamlit.io/develop/api-reference/app-testing/st.testing.v1.apptest) describes the UI test runner used by this project.
 
@@ -99,7 +101,8 @@ EasyOats_Order_App/
 ├── services/
 │   ├── order_service.py       # Application operations, validation and audit
 │   ├── inventory_service.py   # Inventory projection
-│   └── excel_service.py       # Template-preserving atomic export
+│   ├── excel_service.py       # Template-preserving atomic export
+│   └── excel_import_service.py # Validated, revision-bound order import
 ├── utils/
 │   └── phone.py               # Egyptian number normalization
 ├── tests/                     # Automated functional and integration tests

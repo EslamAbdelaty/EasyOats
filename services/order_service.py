@@ -24,6 +24,8 @@ from constants import (
 from database import Database, PROJECT_ROOT
 from models import AppSetting, AppUser, AuditHistory, Feedback, Inventory, Order, SyncState, utc_now
 from services.inventory_service import inventory_rows
+from services.excel_import_service import ExcelImportError, parse_order_workbook
+from services.excel_service import ORDER_HEADERS
 from utils.phone import PhoneValidationError, normalize_partial_phone, normalize_phone
 
 logger = logging.getLogger(__name__)
@@ -483,6 +485,22 @@ class AppService:
             self._audit(session, order_id, "inventory_override", "override_reason", None,
                         string_value(override_reason, "سبب التجاوز", 2000, True), user)
 
+    def _check_order_update_override(self, session, order, values, actor, is_admin, override_reason):
+        """Apply the lifecycle override rules shared by UI and Excel updates."""
+        if order.status == "تم التوصيل" and values["status"] not in ("تم التوصيل", "مرتجع"):
+            if not is_admin or not str(override_reason or "").strip():
+                raise ValidationError("لإلغاء طلب تم تسليمه اختر مرتجع. تصحيح حالة التسليم يحتاج تجاوز مسؤول مع السبب.")
+            self._audit(session, order.order_id, "status_override", "override_reason", None, override_reason, actor)
+        if order.status == "مرتجع" and values["status"] != "مرتجع":
+            if not is_admin or not str(override_reason or "").strip():
+                raise ValidationError("إعادة فتح طلب مرتجع تحتاج تجاوز مسؤول مع تسجيل سبب التصحيح.")
+            self._audit(session, order.order_id, "status_override", "override_reason", None, override_reason, actor)
+        if order.status in ("تم التوصيل", "مرتجع") and any(
+                getattr(order, key) != values[key] for key in ("honey_qty", "date_qty", "order_type")):
+            if not is_admin or not str(override_reason or "").strip():
+                raise ValidationError("تعديل منتجات طلب تم تسليمه أو إرجاعه يحتاج تجاوز مسؤول مع تسجيل السبب.")
+            self._audit(session, order.order_id, "inventory_override", "override_reason", None, override_reason, actor)
+
     def create_order(self, data, user=None, override_reason=None, is_admin=False) -> dict:
         with self._transaction() as session:
             settings = self._settings(session)
@@ -512,19 +530,9 @@ class AppService:
             settings = self._settings(session)
             before = inventory_rows(session, settings)
             values = self._validate_order(data, settings, existing=order)
-            if order.status == "تم التوصيل" and values["status"] not in ("تم التوصيل", "مرتجع"):
-                if not is_admin or not str(override_reason or "").strip():
-                    raise ValidationError("لإلغاء طلب تم تسليمه اختر مرتجع. تصحيح حالة التسليم يحتاج تجاوز مسؤول مع السبب.")
-                self._audit(session, order_id, "status_override", "override_reason", None, override_reason, actor)
-            if order.status == "مرتجع" and values["status"] != "مرتجع":
-                if not is_admin or not str(override_reason or "").strip():
-                    raise ValidationError("إعادة فتح طلب مرتجع تحتاج تجاوز مسؤول مع تسجيل سبب التصحيح.")
-                self._audit(session, order_id, "status_override", "override_reason", None, override_reason, actor)
-            if order.status in ("تم التوصيل", "مرتجع") and any(
-                    getattr(order, key) != values[key] for key in ("honey_qty", "date_qty", "order_type")):
-                if not is_admin or not str(override_reason or "").strip():
-                    raise ValidationError("تعديل منتجات طلب تم تسليمه أو إرجاعه يحتاج تجاوز مسؤول مع تسجيل السبب.")
-                self._audit(session, order_id, "inventory_override", "override_reason", None, override_reason, actor)
+            self._check_order_update_override(
+                session, order, values, actor, is_admin, override_reason,
+            )
             for field, value in values.items():
                 previous = getattr(order, field)
                 if previous != value:
@@ -537,6 +545,125 @@ class AppService:
             feedback = [self._raw(item) for item in session.scalars(
                 select(Feedback).where(Feedback.order_id == order_id).order_by(Feedback.response_date.desc(), Feedback.id.desc()))]
             result = self._order_dict(order, feedback)
+        self._after_commit()
+        return result
+
+    @staticmethod
+    def _import_value(value):
+        if value is None:
+            return "—"
+        if isinstance(value, datetime):
+            return value.isoformat(sep=" ", timespec="minutes")
+        if isinstance(value, date):
+            return value.isoformat()
+        if isinstance(value, bool):
+            return "نعم" if value else "لا"
+        if isinstance(value, Decimal):
+            return format(value, "f")
+        return str(value)
+
+    def _excel_import_plan(self, session, workbook_bytes):
+        try:
+            parsed = parse_order_workbook(workbook_bytes)
+        except ExcelImportError as exc:
+            raise ValidationError(str(exc)) from None
+        state = session.get(SyncState, 1)
+        if parsed.revision != state.revision:
+            raise ValidationError(
+                "نسخة Excel أقدم من بيانات التطبيق. صدّر نسخة جديدة، أعد تعديلاتك عليها، ثم ارفعها مرة أخرى."
+            )
+        orders = {item.order_id: item for item in session.scalars(select(Order))}
+        incoming = set(parsed.rows)
+        existing = set(orders)
+        unknown = sorted(incoming - existing)
+        if unknown:
+            raise ValidationError(
+                "لا يمكن إنشاء طلبات جديدة من Excel. أرقام غير موجودة: " + "، ".join(unknown[:10])
+            )
+        missing = sorted(existing - incoming)
+        if missing:
+            raise ValidationError(
+                "ملف Excel لا يحتوي كل الطلبات الحالية. نزّل نسخة جديدة من التطبيق قبل التعديل."
+            )
+        settings = self._settings(session)
+        validated = {}
+        changes = []
+        for order_id in sorted(incoming):
+            order = orders[order_id]
+            try:
+                values = self._validate_order(parsed.rows[order_id], settings, existing=order)
+            except ValidationError as exc:
+                raise ValidationError(f"الطلب {order_id}: {exc}") from None
+            validated[order_id] = values
+            for field, value in values.items():
+                previous = getattr(order, field)
+                if previous != value:
+                    changes.append({
+                        "order_id": order_id,
+                        "field": field,
+                        "label": ORDER_HEADERS.get(field, field),
+                        "old_value": self._import_value(previous),
+                        "new_value": self._import_value(value),
+                    })
+        return parsed.revision, orders, validated, changes
+
+    def preview_excel_order_import(self, workbook_bytes: bytes) -> dict:
+        """Validate an upload and return a read-only, revision-bound change plan."""
+        with self.Session() as session:
+            revision, _orders, _validated, changes = self._excel_import_plan(session, workbook_bytes)
+            return {
+                "revision": revision,
+                "order_count": len(_orders),
+                "changed_orders": len({change["order_id"] for change in changes}),
+                "change_count": len(changes),
+                "changes": changes,
+            }
+
+    def import_excel_order_updates(self, workbook_bytes: bytes, expected_revision: int, *,
+                                   user=None, actor_email=None, is_admin=False,
+                                   import_reason=None) -> dict:
+        """Atomically apply a previously previewed workbook to existing orders."""
+        reason = string_value(import_reason, "سبب استيراد ملف Excel", 2000, required=True)
+        with self._transaction() as session:
+            if actor_email:
+                account = self._require_admin(session, actor_email)
+                actor = f"{account.display_name} ({account.email})"
+                is_admin = True
+            elif is_admin:
+                actor = self._actor(session, user)
+            else:
+                raise ValidationError("استيراد تعديلات Excel متاح لمسؤول النظام فقط.")
+            state = session.get(SyncState, 1)
+            if state.revision != int(expected_revision):
+                raise ValidationError("تغيّرت البيانات بعد المعاينة. افحص الملف مرة أخرى قبل تطبيقه.")
+            revision, orders, validated, changes = self._excel_import_plan(session, workbook_bytes)
+            if revision != int(expected_revision):
+                raise ValidationError("تم تغيير ملف Excel بعد المعاينة. افحصه مرة أخرى قبل التطبيق.")
+            if not changes:
+                return {"changed_orders": 0, "change_count": 0}
+            before = inventory_rows(session, self._settings(session))
+            changed_order_ids = {item["order_id"] for item in changes}
+            for order_id, values in validated.items():
+                order = orders[order_id]
+                if order_id not in changed_order_ids:
+                    continue
+                self._check_order_update_override(
+                    session, order, values, actor, True, reason,
+                )
+                for field, value in values.items():
+                    previous = getattr(order, field)
+                    if previous != value:
+                        self._audit(session, order_id, "excel_import", field, previous, value, actor)
+                        setattr(order, field, value)
+                order.updated_at = utc_now()
+            session.flush()
+            self._check_stock(session, before, None, actor, True, reason)
+            self._audit(session, None, "excel_import", "import_reason", None, reason, actor)
+            self._mark_pending(session)
+            result = {
+                "changed_orders": len({change["order_id"] for change in changes}),
+                "change_count": len(changes),
+            }
         self._after_commit()
         return result
 

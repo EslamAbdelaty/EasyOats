@@ -26,6 +26,7 @@ from zipfile import ZipFile
 from filelock import FileLock, Timeout
 from openpyxl import load_workbook
 from openpyxl.chart.data_source import NumData, NumVal, StrData, StrVal
+from openpyxl.packaging.custom import IntProperty
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import range_boundaries
 from openpyxl.utils.datetime import to_excel
@@ -83,6 +84,7 @@ CALCULATED = {
 }
 STATUSES = ("جديد", "مؤكد", "جاري التجهيز", "جاهز", "خرج للتوصيل", "تم التوصيل", "ملغي", "مرتجع")
 DEMO_IDS = {"مثال-احذفه", "FB-EXAMPLE"}
+REVISION_PROPERTY = "EasyOatsDatabaseRevision"
 
 
 @dataclass(frozen=True)
@@ -352,6 +354,11 @@ class ExcelService:
         return True
 
     def _render(self, workbook, data):
+        if REVISION_PROPERTY in workbook.custom_doc_props.names:
+            del workbook.custom_doc_props[REVISION_PROPERTY]
+        workbook.custom_doc_props.append(IntProperty(
+            name=REVISION_PROPERTY, value=int(data.get("_revision", 0)),
+        ))
         orders = data.get("orders", [])
         # LOOKUP returns the last matching record, so chronological export makes
         # the displayed order rating agree with its latest response on recalc.

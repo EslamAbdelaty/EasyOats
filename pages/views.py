@@ -1,6 +1,7 @@
 """Seven complete Arabic operational pages for EasyOats."""
 from __future__ import annotations
 
+import hashlib
 import os
 from collections import Counter
 from datetime import date, datetime, timedelta
@@ -701,6 +702,94 @@ def settings_page(service: Any) -> None:
                 st.caption("النسخة المتاحة للتنزيل هي آخر نسخة ناجحة؛ قد لا تشمل التعديلات التي تنتظر المزامنة.")
         else:
             st.info("اضغط تصدير Excel الآن لإنشاء النسخة الأولى.")
+
+        st.divider()
+        st.subheader("استيراد تعديلات الطلبات من Excel")
+        st.write(
+            "نزّل أحدث نسخة، عدّل الطلبات الموجودة داخل ورقة «الطلبات»، ثم ارفع الملف هنا. "
+            "سيعرض التطبيق كل تغيير قبل حفظه."
+        )
+        st.caption(
+            "لا تغيّر أرقام الطلبات أو أسماء الأوراق والأعمدة. الحقول المحسوبة مثل الإجمالي والمتبقي "
+            "وحالة الدفع يعيد التطبيق حسابها تلقائياً."
+        )
+        if not is_admin:
+            st.info("استيراد تعديلات Excel متاح لمسؤول النظام فقط.")
+        else:
+            generation = st.session_state.get("excel_import_generation", 0)
+            uploaded = st.file_uploader(
+                "ارفع ملف EasyOats بصيغة xlsx",
+                type="xlsx",
+                max_upload_size=10,
+                key=f"excel_import_file_{generation}",
+                help="استخدم نسخة نُزّلت حديثاً من هذه الصفحة.",
+            )
+            if uploaded is not None:
+                workbook_bytes = uploaded.getvalue()
+                digest = hashlib.sha256(workbook_bytes).hexdigest()
+                if st.button("فحص التعديلات", key="preview_excel_import", width="stretch"):
+                    try:
+                        with st.spinner("جارٍ فحص الملف ومقارنته بقاعدة البيانات…"):
+                            plan = service.preview_excel_order_import(workbook_bytes)
+                        st.session_state["excel_import_preview"] = {"digest": digest, "plan": plan}
+                    except Exception as exc:
+                        st.session_state.pop("excel_import_preview", None)
+                        show_error(exc)
+                preview = st.session_state.get("excel_import_preview")
+                if preview and preview.get("digest") == digest:
+                    plan = preview["plan"]
+                    if plan["change_count"]:
+                        st.success(
+                            f'تم العثور على {plan["change_count"]} تعديل في '
+                            f'{plan["changed_orders"]} طلب.'
+                        )
+                        st.dataframe(pd.DataFrame([{
+                            "رقم الطلب": item["order_id"],
+                            "الحقل": item["label"],
+                            "القيمة الحالية": item["old_value"],
+                            "القيمة الجديدة": item["new_value"],
+                        } for item in plan["changes"]]), hide_index=True, width="stretch")
+                        reason = st.text_area(
+                            "سبب الاستيراد *",
+                            placeholder="مثال: تحديث حالات التوصيل والتحصيل من ملف متابعة الفريق",
+                            key="excel_import_reason",
+                        )
+                        confirmed = st.checkbox(
+                            "راجعت التعديلات وأؤكد تطبيقها على قاعدة البيانات",
+                            key="excel_import_confirmed",
+                        )
+                        if st.button(
+                            "تطبيق التعديلات على التطبيق",
+                            type="primary",
+                            width="stretch",
+                            disabled=not confirmed,
+                            key="apply_excel_import",
+                        ):
+                            if not reason.strip():
+                                st.error("اكتب سبب الاستيراد قبل تطبيق التعديلات.")
+                            else:
+                                try:
+                                    with st.spinner("جارٍ حفظ التعديلات وإعادة إنشاء نسخة Excel…"):
+                                        result = service.import_excel_order_updates(
+                                            workbook_bytes,
+                                            plan["revision"],
+                                            user=user_name(),
+                                            actor_email=st.session_state.get("auth_email") if hosted else None,
+                                            is_admin=is_admin,
+                                            import_reason=reason,
+                                        )
+                                    st.session_state.pop("excel_import_preview", None)
+                                    st.session_state["excel_import_generation"] = generation + 1
+                                    after_save(
+                                        f'تم استيراد {result["change_count"]} تعديل في '
+                                        f'{result["changed_orders"]} طلب.',
+                                        service,
+                                    )
+                                    st.rerun()
+                                except Exception as exc:
+                                    show_error(exc)
+                    else:
+                        st.info("الملف مطابق لبيانات التطبيق ولا يحتوي تعديلات قابلة للاستيراد.")
     with audit_tab:
         st.subheader("كل تعديل له سجل")
         history = audit_rows(service.audit_history())

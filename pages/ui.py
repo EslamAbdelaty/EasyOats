@@ -162,7 +162,7 @@ FIELD_LABELS = {
 def audit_rows(entries: list[dict]) -> list[dict]:
     actions = {"create": "إنشاء", "created": "إنشاء", "update": "تحديث", "updated": "تحديث", "create_order": "إنشاء طلب",
                "update_order": "تحديث طلب", "feedback": "حفظ فيدباك", "inventory": "تحديث المخزون", "settings": "تحديث الإعدادات",
-               "inventory_override": "تجاوز المخزون", "admin_override": "تجاوز بصلاحية مسؤول", "create_feedback": "إضافة فيدباك",
+               "inventory_override": "تجاوز المخزون", "admin_override": "تجاوز بصلاحية مسؤول", "excel_import": "استيراد من Excel", "create_feedback": "إضافة فيدباك",
                "update_feedback": "تحديث فيدباك", "update_inventory": "تحديث المخزون", "update_settings": "تحديث الإعدادات"}
     return [{
         "التاريخ": date_label(row.get("timestamp") or row.get("created_at"), True),
