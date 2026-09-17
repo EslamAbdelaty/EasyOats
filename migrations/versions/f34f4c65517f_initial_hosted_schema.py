@@ -1,7 +1,7 @@
 """initial hosted schema
 
 Revision ID: f34f4c65517f
-Revises: 
+Revises:
 Create Date: 2026-09-17 14:06:01.241689
 """
 from typing import Sequence, Union
