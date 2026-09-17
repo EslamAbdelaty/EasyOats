@@ -1,0 +1,9 @@
+streamlit[auth]>=1.64,<2
+SQLAlchemy>=2.0.40,<2.1
+alembic>=1.16,<2
+openpyxl>=3.1.5,<3.2
+python-dotenv>=1.1,<2
+tzdata>=2025.2
+filelock>=3.18,<4
+psycopg[binary]>=3.2,<4
+pytest>=8.3,<10

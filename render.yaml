@@ -1,0 +1,46 @@
+databases:
+  - name: easyoats-postgres
+    databaseName: easyoats
+    user: easyoats
+    plan: basic-256mb
+
+services:
+  - type: web
+    name: easyoats-order-manager
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python deployment/start.py
+    healthCheckPath: /_stcore/health
+    autoDeployTrigger: commit
+    disk:
+      name: easyoats-files
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: easyoats-postgres
+          property: connectionString
+      - key: AUTH_REQUIRED
+        value: "true"
+      - key: EXCEL_PATH
+        value: /var/data/EasyOats_Order_Tracker.xlsx
+      - key: BACKUP_DIR
+        value: /var/data/backups
+      - key: TEMPLATE_PATH
+        value: templates/EasyOats_Order_Tracker.xlsx
+      - key: OIDC_SERVER_METADATA_URL
+        value: https://accounts.google.com/.well-known/openid-configuration
+      - key: OIDC_REDIRECT_URI
+        sync: false
+      - key: OIDC_CLIENT_ID
+        sync: false
+      - key: OIDC_CLIENT_SECRET
+        sync: false
+      - key: AUTH_COOKIE_SECRET
+        generateValue: true
+      - key: BOOTSTRAP_ADMIN_EMAILS
+        sync: false
+      - key: BOOTSTRAP_STAFF_EMAILS
+        sync: false
