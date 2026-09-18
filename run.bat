@@ -25,6 +25,9 @@ set "EASYOATS_REQUIREMENTS=requirements.txt"
 if exist requirements-lock.txt set "EASYOATS_REQUIREMENTS=requirements-lock.txt"
 ".venv\Scripts\python.exe" -m pip install --disable-pip-version-check -r "%EASYOATS_REQUIREMENTS%"
 if errorlevel 1 goto failed
+echo Updating the EasyOats database schema.
+".venv\Scripts\python.exe" scripts\upgrade_database.py
+if errorlevel 1 goto failed
 echo Opening EasyOats at http://localhost:8501
 ".venv\Scripts\python.exe" -m streamlit run app.py --server.address 127.0.0.1 --server.headless false --browser.gatherUsageStats false
 if errorlevel 1 goto failed

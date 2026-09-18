@@ -163,12 +163,21 @@ def audit_rows(entries: list[dict]) -> list[dict]:
     actions = {"create": "إنشاء", "created": "إنشاء", "update": "تحديث", "updated": "تحديث", "create_order": "إنشاء طلب",
                "update_order": "تحديث طلب", "feedback": "حفظ فيدباك", "inventory": "تحديث المخزون", "settings": "تحديث الإعدادات",
                "inventory_override": "تجاوز المخزون", "admin_override": "تجاوز بصلاحية مسؤول", "excel_import": "استيراد من Excel", "create_feedback": "إضافة فيدباك",
-               "update_feedback": "تحديث فيدباك", "update_inventory": "تحديث المخزون", "update_settings": "تحديث الإعدادات"}
+               "update_feedback": "تحديث فيدباك", "update_inventory": "تحديث المخزون", "update_settings": "تحديث الإعدادات",
+               "product_create": "إضافة منتج", "product_update": "تحديث منتج"}
+    def field_label(value: str | None) -> str:
+        if value and value.startswith("product."):
+            parts = value.split(".")
+            kind = {"quantity": "كمية المنتج", "unit_cost": "تكلفة المنتج", "name": "اسم المنتج",
+                    "opening_stock": "الرصيد الافتتاحي", "added_stock": "المخزون المضاف",
+                    "reorder_point": "حد إعادة الطلب", "active": "حالة المنتج"}.get(parts[-1], "بيانات المنتج")
+            return f'{kind} · {parts[1]}' if len(parts) > 2 else kind
+        return FIELD_LABELS.get(value, "بيانات السجل")
     return [{
         "التاريخ": date_label(row.get("timestamp") or row.get("created_at"), True),
         "رقم الطلب": row.get("order_id") or "—",
         "الإجراء": actions.get(row.get("action"), "تعديل"),
-        "الحقل": FIELD_LABELS.get(row.get("field") or row.get("changed_field"), "بيانات السجل"),
+        "الحقل": field_label(row.get("field") or row.get("changed_field")),
         "قبل التعديل": str(row.get("old_value") or "—"),
         "بعد التعديل": str(row.get("new_value") or "—"),
         "المستخدم": row.get("user_name") or row.get("user") or "—",

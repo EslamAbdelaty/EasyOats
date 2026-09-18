@@ -95,6 +95,7 @@ Keep the local SQLite migration backup until these checks pass. After cutover, P
 ## Operations
 
 - Add, suspend, or promote accounts from the hosted settings page. Keep at least two administrator emails for recovery.
+- Administrators add or stop flavors/products from the inventory page. Existing order line items retain their original unit costs after a product cost changes.
 - To edit existing orders in Excel, download the latest workbook from **الإعدادات والتصدير → Excel والتصدير**, edit the **الطلبات** sheet, then upload it in the administrator-only import section. Preview and confirm the changes with an audit reason. Stale workbooks and changed/new order IDs are rejected.
 - Review Render PostgreSQL backup/retention settings before launch. Periodically test a restore into a separate database.
 - The persistent disk holds operational Excel copies, while PostgreSQL remains the source of truth.

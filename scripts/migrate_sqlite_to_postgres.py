@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 TABLE_ORDER = (
-    "settings", "inventory", "orders", "feedback", "sync_state",
+    "settings", "inventory", "orders", "order_items", "feedback", "sync_state",
     "audit_history", "app_users",
 )
 SEQUENCE_TABLES = ("orders", "feedback", "audit_history")
@@ -70,10 +70,13 @@ def upgrade_target(target_url: str) -> None:
     try:
         existing = set(inspect(engine).get_table_names())
         if existing and "alembic_version" not in existing:
-            from models import Base
-            expected = set(Base.metadata.tables)
-            if expected.issubset(existing):
-                command.stamp(config, "head")
+            legacy = {"settings", "inventory", "orders", "feedback", "sync_state", "audit_history", "app_users"}
+            if legacy.issubset(existing):
+                inventory_columns = {column["name"] for column in inspect(engine).get_columns("inventory")}
+                if "order_items" in existing and {"unit_cost", "active"}.issubset(inventory_columns):
+                    command.stamp(config, "head")
+                else:
+                    command.stamp(config, "f34f4c65517f")
     finally:
         engine.dispose()
     command.upgrade(config, "head")

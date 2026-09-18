@@ -22,7 +22,7 @@ from constants import (
     ORDER_TYPES, PAYMENT_METHODS, PRODUCTS, SOURCES,
 )
 from database import Database, PROJECT_ROOT
-from models import AppSetting, AppUser, AuditHistory, Feedback, Inventory, Order, SyncState, utc_now
+from models import AppSetting, AppUser, AuditHistory, Feedback, Inventory, Order, OrderItem, SyncState, utc_now
 from services.inventory_service import inventory_rows
 from services.excel_import_service import ExcelImportError, parse_order_workbook
 from services.excel_service import ORDER_HEADERS
@@ -151,28 +151,38 @@ def payment_status(total_due, amount_collected, refund_amount=0) -> str:
 def calculate_order(data: dict, settings: dict | None = None) -> dict:
     """Pure Decimal arithmetic; explicit snapshot prices always take precedence."""
     settings = {**DEFAULT_SETTINGS, **(settings or {})}
-    honey = int(data.get("honey_qty", 0))
-    dates = int(data.get("date_qty", 0))
+    if "items" in data:
+        items = data.get("items") or []
+        quantities = [int(item.get("quantity", 0)) for item in items]
+        total_units = sum(quantities)
+        product_cost = sum(
+            Decimal(str(item.get("unit_cost", 0))) * quantity
+            for item, quantity in zip(items, quantities)
+        )
+    else:
+        honey = int(data.get("honey_qty", 0))
+        dates = int(data.get("date_qty", 0))
+        total_units = honey + dates
+        honey_cost = Decimal(str(data.get("honey_unit_cost", settings["honey_unit_cost"])))
+        date_cost = Decimal(str(data.get("date_unit_cost", settings["date_unit_cost"])))
+        product_cost = honey_cost * honey + date_cost * dates
     kind = data.get("order_type", "سعر عادي")
     price = data.get("unit_price")
     if price is None:
         price = (Decimal(str(settings["offer_price"])) / 2 if kind == "عرض 2 بـ120"
                  else Decimal("0") if kind == "عينة" else Decimal(str(settings["retail_price"])))
     price = Decimal(str(price)).quantize(CENT, rounding=ROUND_HALF_UP)
-    honey_cost = Decimal(str(data.get("honey_unit_cost", settings["honey_unit_cost"])))
-    date_cost = Decimal(str(data.get("date_unit_cost", settings["date_unit_cost"])))
-    subtotal = price * (honey + dates)
+    subtotal = price * total_units
     due = subtotal - Decimal(str(data.get("discount", 0))) + Decimal(str(data.get("delivery_fee", 0)))
-    cost = honey_cost * honey + date_cost * dates
     collected = Decimal(str(data.get("amount_collected", 0)))
     refund = Decimal(str(data.get("refund_amount", 0)))
     result = {
-        "total_units": honey + dates,
+        "total_units": total_units,
         "unit_price": price,
         "product_subtotal": subtotal,
         "total_due": due,
-        "product_cost": cost,
-        "contribution_margin": due - cost - Decimal(str(data.get("delivery_cost", 0))),
+        "product_cost": product_cost,
+        "contribution_margin": due - product_cost - Decimal(str(data.get("delivery_cost", 0))),
         "outstanding_balance": due - collected,
         "payment_status": payment_status(due, collected, refund),
     }
@@ -221,7 +231,8 @@ class AppService:
             for sku, opening in (("honey", 238), ("date", 250)):
                 if session.get(Inventory, sku) is None:
                     session.add(Inventory(sku=sku, name=PRODUCTS[sku], opening_stock=opening,
-                                          added_stock=0, reorder_point=50))
+                                          added_stock=0, reorder_point=50,
+                                          unit_cost=DEFAULT_SETTINGS[f"{sku}_unit_cost"], active=True))
             if session.get(SyncState, 1) is None:
                 session.add(SyncState(id=1, revision=0, synced_revision=-1, pending=True,
                                       message="لم تتم مزامنة Excel بعد."))
@@ -349,8 +360,50 @@ class AppService:
         return {column.name: (float(value) if isinstance(value := getattr(model, column.name), Decimal) else value)
                 for column in model.__table__.columns}
 
-    def _order_dict(self, order, feedback=None):
+    def _item_map(self, session, order_ids=None):
+        query = (select(OrderItem, Inventory.name, Inventory.active)
+                 .join(Inventory, Inventory.sku == OrderItem.sku)
+                 .order_by(OrderItem.order_id, Inventory.name, OrderItem.sku))
+        if order_ids is not None:
+            order_ids = list(order_ids)
+            if not order_ids:
+                return {}
+            query = query.where(OrderItem.order_id.in_(order_ids))
+        result = {}
+        for item, name, active in session.execute(query):
+            result.setdefault(item.order_id, []).append({
+                "sku": item.sku, "name": name, "quantity": item.quantity,
+                "unit_cost": float(item.unit_cost), "active": active,
+            })
+        return result
+
+    def _order_dict(self, order, feedback=None, items=None):
         result = self._raw(order)
+        if items is None:
+            items = []
+            for sku, name, quantity, unit_cost in (
+                ("honey", PRODUCTS["honey"], order.honey_qty, order.honey_unit_cost),
+                ("date", PRODUCTS["date"], order.date_qty, order.date_unit_cost),
+            ):
+                if quantity:
+                    items.append({
+                        "sku": sku, "name": name, "quantity": quantity,
+                        "unit_cost": float(unit_cost), "active": True,
+                    })
+        items = [{**item, "unit_cost": float(item["unit_cost"])} for item in items]
+        result["items"] = items
+        result["product_quantities"] = {item["sku"]: item["quantity"] for item in items}
+        result["product_unit_costs"] = {item["sku"]: item["unit_cost"] for item in items}
+        result["honey_qty"] = result["product_quantities"].get("honey", 0)
+        result["date_qty"] = result["product_quantities"].get("date", 0)
+        result["products_summary"] = "، ".join(
+            f'{item["name"]}: {item["quantity"]}' for item in items if item["quantity"]
+        )
+        extra_items = [item for item in items if item["sku"] not in {"honey", "date"}]
+        result["extra_units"] = sum(item["quantity"] for item in extra_items)
+        result["extra_product_cost"] = sum(
+            item["quantity"] * item["unit_cost"] for item in extra_items
+        )
         result.update(calculate_order(result))
         result["next_action"] = next_action(result)
         if feedback is not None:
@@ -387,7 +440,7 @@ class AppService:
             except Exception:
                 logger.exception("Post-commit Excel sync failed; database change is safe")
 
-    def _validate_order(self, payload, settings, existing=None):
+    def _validate_order(self, payload, settings, existing=None, existing_items=None, products=None):
         base = self._raw(existing) if existing else {
             "customer_name": "", "phone_original": "", "order_datetime": local_now(),
             "source": "واتساب", "area": "", "address": "", "location_url": "",
@@ -407,6 +460,10 @@ class AppService:
             "customer_rating", "buy_again", "notes", "returned_sellable", "refund_amount",
         }
         payload = dict(payload)
+        existing_items = list(existing_items or [])
+        products = products or {}
+        existing_quantities = {item.sku: item.quantity for item in existing_items}
+        existing_costs = {item.sku: item.unit_cost for item in existing_items}
         if "phone" in payload and "phone_original" not in payload:
             payload["phone_original"] = payload["phone"]
         if "order_id" in payload and payload["order_id"] != (existing.order_id if existing else None):
@@ -434,9 +491,32 @@ class AppService:
             ("feedback_status", FEEDBACK_STATUSES, "حالة الفيدباك"), ("buy_again", BUY_AGAIN_OPTIONS, "الشراء مجدداً"),
         ):
             result[key] = choice(result[key], options, label)
-        for key, label in (("honey_qty", "كمية عسل ولبن"), ("date_qty", "كمية دبس تمر ولبن")):
-            result[key] = integer(result[key], label)
-        if result["honey_qty"] + result["date_qty"] == 0 and result["order_type"] not in ("طلب شركة", "أخرى"):
+        if "product_quantities" in payload:
+            if not isinstance(payload["product_quantities"], dict):
+                raise ValidationError("كميات المنتجات يجب أن تكون قائمة مرتبطة بأكواد المنتجات.")
+            raw_quantities = dict(payload["product_quantities"])
+        else:
+            raw_quantities = dict(existing_quantities)
+            if not existing:
+                raw_quantities = {}
+            if "honey_qty" in payload or not existing:
+                raw_quantities["honey"] = payload.get("honey_qty", result["honey_qty"])
+            if "date_qty" in payload or not existing:
+                raw_quantities["date"] = payload.get("date_qty", result["date_qty"])
+        quantities = {}
+        for raw_sku, raw_quantity in raw_quantities.items():
+            sku = str(raw_sku).strip().casefold()
+            product = products.get(sku)
+            if product is None:
+                raise ValidationError(f"المنتج ذو الكود {sku or 'فارغ'} غير موجود.")
+            quantity = integer(raw_quantity, f"كمية {product.name}")
+            if quantity and not product.active and quantity > existing_quantities.get(sku, 0):
+                raise ValidationError(f"المنتج {product.name} متوقف ولا يمكن إضافة كمية جديدة منه.")
+            if quantity:
+                quantities[sku] = quantity
+        result["honey_qty"] = quantities.get("honey", 0)
+        result["date_qty"] = quantities.get("date", 0)
+        if sum(quantities.values()) == 0 and result["order_type"] not in ("طلب شركة", "أخرى"):
             raise ValidationError("أضف كوباً واحداً على الأقل، أو اختر طلب شركة / أخرى للطلبات الخاصة.")
         for key, label in (("discount", "الخصم"), ("delivery_fee", "رسوم التوصيل"), ("delivery_cost", "تكلفة التوصيل"),
                            ("amount_collected", "المبلغ المحصل"), ("refund_amount", "المبلغ المسترد")):
@@ -461,18 +541,25 @@ class AppService:
             result["returned_sellable"] = False
         if existing:
             result["unit_price"] = existing.unit_price
-            result["honey_unit_cost"] = existing.honey_unit_cost
-            result["date_unit_cost"] = existing.date_unit_cost
+            result["honey_unit_cost"] = existing_costs.get("honey", existing.honey_unit_cost)
+            result["date_unit_cost"] = existing_costs.get("date", existing.date_unit_cost)
         else:
-            result["honey_unit_cost"] = money(settings["honey_unit_cost"])
-            result["date_unit_cost"] = money(settings["date_unit_cost"])
+            result["honey_unit_cost"] = money(products["honey"].unit_cost)
+            result["date_unit_cost"] = money(products["date"].unit_cost)
         if not existing or existing.order_type != result["order_type"]:
             result["unit_price"] = money(
                 Decimal(str(settings["offer_price"])) / 2 if result["order_type"] == "عرض 2 بـ120"
                 else 0 if result["order_type"] == "عينة" else settings["retail_price"])
-        if calculate_order(result)["total_due"] < 0:
+        item_values = [{
+            "sku": sku,
+            "name": products[sku].name,
+            "quantity": quantity,
+            "unit_cost": money(existing_costs.get(sku, products[sku].unit_cost)),
+            "active": products[sku].active,
+        } for sku, quantity in sorted(quantities.items())]
+        if calculate_order({**result, "items": item_values})["total_due"] < 0:
             raise ValidationError("الخصم لا يمكن أن يتجاوز قيمة المنتجات ورسوم التوصيل.")
-        return result
+        return result, item_values
 
     def _check_stock(self, session, before, order_id, user, is_admin, override_reason):
         after = inventory_rows(session, self._settings(session))
@@ -485,7 +572,35 @@ class AppService:
             self._audit(session, order_id, "inventory_override", "override_reason", None,
                         string_value(override_reason, "سبب التجاوز", 2000, True), user)
 
-    def _check_order_update_override(self, session, order, values, actor, is_admin, override_reason):
+    @staticmethod
+    def _products(session):
+        return {item.sku: item for item in session.scalars(select(Inventory))}
+
+    @staticmethod
+    def _order_items(session, order_id):
+        return list(session.scalars(select(OrderItem).where(OrderItem.order_id == order_id)))
+
+    def _replace_order_items(self, session, order_id, current_items, item_values, actor, action):
+        current = {item.sku: item for item in current_items}
+        incoming = {item["sku"]: item for item in item_values}
+        for sku, item in current.items():
+            if sku not in incoming:
+                self._audit(session, order_id, action, f"product.{sku}.quantity", item.quantity, 0, actor)
+                session.delete(item)
+        for sku, value in incoming.items():
+            item = current.get(sku)
+            if item is None:
+                session.add(OrderItem(
+                    order_id=order_id, sku=sku, quantity=value["quantity"], unit_cost=value["unit_cost"],
+                ))
+                self._audit(session, order_id, action, f"product.{sku}.quantity", 0, value["quantity"], actor)
+                self._audit(session, order_id, action, f"product.{sku}.unit_cost", None, value["unit_cost"], actor)
+            elif item.quantity != value["quantity"]:
+                self._audit(session, order_id, action, f"product.{sku}.quantity", item.quantity, value["quantity"], actor)
+                item.quantity = value["quantity"]
+
+    def _check_order_update_override(self, session, order, values, current_items, item_values,
+                                     actor, is_admin, override_reason):
         """Apply the lifecycle override rules shared by UI and Excel updates."""
         if order.status == "تم التوصيل" and values["status"] not in ("تم التوصيل", "مرتجع"):
             if not is_admin or not str(override_reason or "").strip():
@@ -495,8 +610,10 @@ class AppService:
             if not is_admin or not str(override_reason or "").strip():
                 raise ValidationError("إعادة فتح طلب مرتجع تحتاج تجاوز مسؤول مع تسجيل سبب التصحيح.")
             self._audit(session, order.order_id, "status_override", "override_reason", None, override_reason, actor)
-        if order.status in ("تم التوصيل", "مرتجع") and any(
-                getattr(order, key) != values[key] for key in ("honey_qty", "date_qty", "order_type")):
+        current_quantities = {item.sku: item.quantity for item in current_items}
+        new_quantities = {item["sku"]: item["quantity"] for item in item_values}
+        if order.status in ("تم التوصيل", "مرتجع") and (
+                order.order_type != values["order_type"] or current_quantities != new_quantities):
             if not is_admin or not str(override_reason or "").strip():
                 raise ValidationError("تعديل منتجات طلب تم تسليمه أو إرجاعه يحتاج تجاوز مسؤول مع تسجيل السبب.")
             self._audit(session, order.order_id, "inventory_override", "override_reason", None, override_reason, actor)
@@ -506,18 +623,20 @@ class AppService:
             settings = self._settings(session)
             actor = self._actor(session, user)
             before = inventory_rows(session, settings)
-            values = self._validate_order(data, settings)
+            products = self._products(session)
+            values, item_values = self._validate_order(data, settings, products=products)
             order = Order(**values)
             session.add(order)
             session.flush()
             order.order_id = f"EO-{order.id:06d}"
+            self._replace_order_items(session, order.order_id, [], item_values, actor, "create")
             session.flush()
             self._check_stock(session, before, order.order_id, actor, is_admin, override_reason)
             for field, value in values.items():
                 self._audit(session, order.order_id, "create", field, None, value, actor)
             self._audit(session, order.order_id, "create", "order_id", None, order.order_id, actor)
             self._mark_pending(session)
-            result = self._order_dict(order, feedback=[])
+            result = self._order_dict(order, feedback=[], items=item_values)
         self._after_commit()
         return result
 
@@ -529,22 +648,27 @@ class AppService:
             actor = self._actor(session, user)
             settings = self._settings(session)
             before = inventory_rows(session, settings)
-            values = self._validate_order(data, settings, existing=order)
+            products = self._products(session)
+            current_items = self._order_items(session, order_id)
+            values, item_values = self._validate_order(
+                data, settings, existing=order, existing_items=current_items, products=products,
+            )
             self._check_order_update_override(
-                session, order, values, actor, is_admin, override_reason,
+                session, order, values, current_items, item_values, actor, is_admin, override_reason,
             )
             for field, value in values.items():
                 previous = getattr(order, field)
                 if previous != value:
                     self._audit(session, order_id, "update", field, previous, value, actor)
                     setattr(order, field, value)
+            self._replace_order_items(session, order_id, current_items, item_values, actor, "update")
             order.updated_at = utc_now()
             session.flush()
             self._check_stock(session, before, order_id, actor, is_admin, override_reason)
             self._mark_pending(session)
             feedback = [self._raw(item) for item in session.scalars(
                 select(Feedback).where(Feedback.order_id == order_id).order_by(Feedback.response_date.desc(), Feedback.id.desc()))]
-            result = self._order_dict(order, feedback)
+            result = self._order_dict(order, feedback, items=item_values)
         self._after_commit()
         return result
 
@@ -586,15 +710,24 @@ class AppService:
                 "ملف Excel لا يحتوي كل الطلبات الحالية. نزّل نسخة جديدة من التطبيق قبل التعديل."
             )
         settings = self._settings(session)
+        products = self._products(session)
+        items_by_order = {
+            order_id: self._order_items(session, order_id) for order_id in existing
+        }
         validated = {}
+        validated_items = {}
         changes = []
         for order_id in sorted(incoming):
             order = orders[order_id]
             try:
-                values = self._validate_order(parsed.rows[order_id], settings, existing=order)
+                values, item_values = self._validate_order(
+                    parsed.rows[order_id], settings, existing=order,
+                    existing_items=items_by_order[order_id], products=products,
+                )
             except ValidationError as exc:
                 raise ValidationError(f"الطلب {order_id}: {exc}") from None
             validated[order_id] = values
+            validated_items[order_id] = item_values
             for field, value in values.items():
                 previous = getattr(order, field)
                 if previous != value:
@@ -605,12 +738,14 @@ class AppService:
                         "old_value": self._import_value(previous),
                         "new_value": self._import_value(value),
                     })
-        return parsed.revision, orders, validated, changes
+        return parsed.revision, orders, items_by_order, validated, validated_items, changes
 
     def preview_excel_order_import(self, workbook_bytes: bytes) -> dict:
         """Validate an upload and return a read-only, revision-bound change plan."""
         with self.Session() as session:
-            revision, _orders, _validated, changes = self._excel_import_plan(session, workbook_bytes)
+            revision, _orders, _current_items, _validated, _validated_items, changes = self._excel_import_plan(
+                session, workbook_bytes,
+            )
             return {
                 "revision": revision,
                 "order_count": len(_orders),
@@ -636,7 +771,9 @@ class AppService:
             state = session.get(SyncState, 1)
             if state.revision != int(expected_revision):
                 raise ValidationError("تغيّرت البيانات بعد المعاينة. افحص الملف مرة أخرى قبل تطبيقه.")
-            revision, orders, validated, changes = self._excel_import_plan(session, workbook_bytes)
+            revision, orders, current_items, validated, validated_items, changes = self._excel_import_plan(
+                session, workbook_bytes,
+            )
             if revision != int(expected_revision):
                 raise ValidationError("تم تغيير ملف Excel بعد المعاينة. افحصه مرة أخرى قبل التطبيق.")
             if not changes:
@@ -648,13 +785,16 @@ class AppService:
                 if order_id not in changed_order_ids:
                     continue
                 self._check_order_update_override(
-                    session, order, values, actor, True, reason,
+                    session, order, values, current_items[order_id], validated_items[order_id], actor, True, reason,
                 )
                 for field, value in values.items():
                     previous = getattr(order, field)
                     if previous != value:
                         self._audit(session, order_id, "excel_import", field, previous, value, actor)
                         setattr(order, field, value)
+                self._replace_order_items(
+                    session, order_id, current_items[order_id], validated_items[order_id], actor, "excel_import",
+                )
                 order.updated_at = utc_now()
             session.flush()
             self._check_stock(session, before, None, actor, True, reason)
@@ -671,8 +811,11 @@ class AppService:
         feedback_by_order = {}
         for item in session.scalars(select(Feedback).order_by(Feedback.response_date.desc(), Feedback.id.desc())):
             feedback_by_order.setdefault(item.order_id, []).append(self._raw(item))
-        return [self._order_dict(order, feedback_by_order.get(order.order_id, []))
-                for order in session.scalars(query.order_by(Order.order_datetime.desc(), Order.id.desc()))]
+        orders = list(session.scalars(query.order_by(Order.order_datetime.desc(), Order.id.desc())))
+        items_by_order = self._item_map(session, (order.order_id for order in orders))
+        return [self._order_dict(
+            order, feedback_by_order.get(order.order_id, []), items_by_order.get(order.order_id, []),
+        ) for order in orders]
 
     def list_orders(self) -> list[dict]:
         with self.Session() as session:
@@ -733,6 +876,10 @@ class AppService:
             if "low_stock_threshold" in values:
                 for item in session.scalars(select(Inventory)):
                     item.reorder_point = values["low_stock_threshold"]
+            for sku in ("honey", "date"):
+                key = f"{sku}_unit_cost"
+                if key in values:
+                    session.get(Inventory, sku).unit_cost = values[key]
             self._mark_pending(session)
         self._after_commit()
 
@@ -755,14 +902,92 @@ class AppService:
                         self._audit(session, None, "inventory_update", f"{sku}.{key}", getattr(item, key), value, actor)
                         setattr(item, key, value)
             if "unit_cost" in data:
-                value = float(money(data["unit_cost"], "تكلفة الوحدة"))
+                value = money(data["unit_cost"], "تكلفة الوحدة")
                 setting = session.get(AppSetting, f"{sku}_unit_cost")
-                self._audit(session, None, "inventory_update", f"{sku}.unit_cost", setting.value, value, actor)
-                setting.value = value
+                if item.unit_cost != value:
+                    self._audit(session, None, "inventory_update", f"{sku}.unit_cost", item.unit_cost, value, actor)
+                    item.unit_cost = value
+                if setting is not None:
+                    setting.value = float(value)
             session.flush()
             self._check_stock(session, before, None, actor, is_admin, override_reason)
             self._mark_pending(session)
         self._after_commit()
+
+    def create_product(self, data, *, user=None, actor_email=None, is_admin=False) -> dict:
+        """Add an active sellable product without changing historical orders."""
+        with self._transaction() as session:
+            if actor_email:
+                account = self._require_admin(session, actor_email)
+                actor = f"{account.display_name} ({account.email})"
+            elif is_admin:
+                actor = self._actor(session, user)
+            else:
+                raise ValidationError("إضافة منتج جديد متاحة لمسؤول النظام فقط.")
+            sku = string_value(data.get("sku"), "كود المنتج", 16, required=True).casefold()
+            if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{1,15}", sku):
+                raise ValidationError("كود المنتج يجب أن يتكون من 2 إلى 16 حرفاً إنجليزياً صغيراً أو رقماً، ويمكن استخدام - و _.")
+            if session.get(Inventory, sku) is not None:
+                raise ValidationError("كود المنتج مستخدم بالفعل.")
+            name = string_value(data.get("name"), "اسم المنتج", 100, required=True)
+            if any(item.name.casefold() == name.casefold() for item in session.scalars(select(Inventory))):
+                raise ValidationError("اسم المنتج مستخدم بالفعل.")
+            product = Inventory(
+                sku=sku,
+                name=name,
+                opening_stock=integer(data.get("opening_stock", 0), "الرصيد الافتتاحي"),
+                added_stock=integer(data.get("added_stock", 0), "المخزون المضاف"),
+                physical_count=None,
+                reorder_point=integer(data.get("reorder_point", 50), "حد إعادة الطلب"),
+                unit_cost=money(data.get("unit_cost", 0), "تكلفة الوحدة"),
+                active=True,
+            )
+            session.add(product)
+            for field in ("name", "opening_stock", "added_stock", "reorder_point", "unit_cost", "active"):
+                self._audit(session, None, "product_create", f"product.{sku}.{field}", None, getattr(product, field), actor)
+            self._mark_pending(session)
+            session.flush()
+            result = self._raw(product)
+        self._after_commit()
+        return result
+
+    def update_product_definition(self, sku, data, *, user=None, actor_email=None, is_admin=False) -> dict:
+        with self._transaction() as session:
+            if actor_email:
+                account = self._require_admin(session, actor_email)
+                actor = f"{account.display_name} ({account.email})"
+            elif is_admin:
+                actor = self._actor(session, user)
+            else:
+                raise ValidationError("تعديل تعريف المنتج متاح لمسؤول النظام فقط.")
+            product = session.get(Inventory, str(sku).casefold())
+            if product is None:
+                raise ValidationError("المنتج غير موجود.")
+            values = {}
+            if "name" in data:
+                values["name"] = string_value(data["name"], "اسم المنتج", 100, required=True)
+                if any(item.sku != product.sku and item.name.casefold() == values["name"].casefold()
+                       for item in session.scalars(select(Inventory))):
+                    raise ValidationError("اسم المنتج مستخدم بالفعل.")
+            if "unit_cost" in data:
+                values["unit_cost"] = money(data["unit_cost"], "تكلفة الوحدة")
+            if "reorder_point" in data:
+                values["reorder_point"] = integer(data["reorder_point"], "حد إعادة الطلب")
+            if "active" in data:
+                values["active"] = boolean(data["active"], "حالة المنتج")
+            for field, value in values.items():
+                previous = getattr(product, field)
+                if previous != value:
+                    self._audit(session, None, "product_update", f"product.{product.sku}.{field}", previous, value, actor)
+                    setattr(product, field, value)
+            legacy_setting = session.get(AppSetting, f"{product.sku}_unit_cost")
+            if legacy_setting is not None and "unit_cost" in values:
+                legacy_setting.value = float(values["unit_cost"])
+            self._mark_pending(session)
+            session.flush()
+            result = self._raw(product)
+        self._after_commit()
+        return result
 
     def save_feedback(self, data, user=None) -> dict:
         with self._transaction() as session:

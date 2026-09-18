@@ -67,6 +67,23 @@ class Inventory(Base):
     added_stock: Mapped[int] = mapped_column(Integer, default=0)
     physical_count: Mapped[int | None] = mapped_column(Integer)
     reorder_point: Mapped[int] = mapped_column(Integer, default=50)
+    unit_cost: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+
+
+class OrderItem(Base):
+    """A product quantity and frozen unit cost attached to an order."""
+
+    __tablename__ = "order_items"
+
+    order_id: Mapped[str] = mapped_column(
+        ForeignKey("orders.order_id", ondelete="CASCADE"), primary_key=True,
+    )
+    sku: Mapped[str] = mapped_column(
+        ForeignKey("inventory.sku"), primary_key=True, index=True,
+    )
+    quantity: Mapped[int] = mapped_column(Integer)
+    unit_cost: Mapped[Decimal] = mapped_column(Numeric(14, 2))
 
 
 class Feedback(Base):

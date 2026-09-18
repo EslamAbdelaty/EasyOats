@@ -57,7 +57,8 @@ ORDER_HEADERS = {
     "returned_sellable": "المرتجع صالح للبيع", "refund_amount": "المبلغ المسترد",
     "frozen_unit_price": "سعر الوحدة وقت الطلب", "honey_unit_cost": "تكلفة العسل وقت الطلب",
     "date_unit_cost": "تكلفة الدبس وقت الطلب", "stored_customer_rating": "التقييم المسجل بالطلب",
-    "stored_buy_again": "إعادة الشراء المسجلة بالطلب",
+    "stored_buy_again": "إعادة الشراء المسجلة بالطلب", "products_summary": "تفاصيل المنتجات",
+    "extra_units": "وحدات المنتجات الإضافية", "extra_product_cost": "تكلفة المنتجات الإضافية",
 }
 FEEDBACK_HEADERS = {
     "id": "رقم الفيدباك", "response_date": "تاريخ الرد", "order_id": "رقم الطلب",
@@ -371,6 +372,8 @@ class ExcelService:
         oh, oc = _headers(ws, ORDER_HEADERS, ("order_id", "customer_name"))
         fh, fc = _headers(fs, FEEDBACK_HEADERS, ("order_id", "customer_name"))
         ih, ic = _headers(ins, INVENTORY_HEADERS, ("sku", "name"))
+        for key in ("extra_units", "extra_product_cost"):
+            ws.column_dimensions[get_column_letter(oc[key])].hidden = True
         old_ends = {ws.title: ws.max_row, fs.title: fs.max_row}
         oe, fe = max(ws.max_row, oh + len(orders)), max(fs.max_row, fh + len(feedback))
         _expand_sheet(ws, oh, oe)
@@ -412,11 +415,11 @@ class ExcelService:
                 elif isinstance(value, (int, float, Decimal)):
                     cell.number_format = "0" if key.endswith("qty") or "rating" in key else "0.00"
             expressions = {
-                "total_units": f'{c("honey_qty")}+{c("date_qty")}',
+                "total_units": f'{c("honey_qty")}+{c("date_qty")}+{c("extra_units")}',
                 "unit_price": c("frozen_unit_price"),
                 "product_subtotal": f'{c("total_units")}*{c("unit_price")}',
                 "total_due": f'{c("product_subtotal")}-{c("discount")}+{c("delivery_fee")}',
-                "product_cost": f'{c("honey_qty")}*{c("honey_unit_cost")}+{c("date_qty")}*{c("date_unit_cost")}',
+                "product_cost": f'{c("honey_qty")}*{c("honey_unit_cost")}+{c("date_qty")}*{c("date_unit_cost")}+{c("extra_product_cost")}',
                 "contribution_margin": f'{c("total_due")}-{c("product_cost")}-{c("delivery_cost")}',
                 "outstanding_balance": f'{c("total_due")}-{c("amount_collected")}',
                 "payment_status": f'IF(AND({c("refund_amount")}>0,{c("refund_amount")}>={c("amount_collected")}),"مسترد",IF({c("outstanding_balance")}<=0,"مدفوع",IF({c("amount_collected")}>0,"مدفوع جزئيًا","غير مدفوع")))',
@@ -445,17 +448,20 @@ class ExcelService:
         for index, record in enumerate(inventory):
             row = ih + index + 1
             c = lambda key: f"{get_column_letter(ic[key])}{row}"
-            quantity = "honey_qty" if "HONEY" in str(record.get("sku", "")).upper() else "date_qty"
-            base = f'{order_range(quantity)},{order_range("order_id")},"<>",{order_range("order_id")},"<>مثال-احذفه"'
-            expressions = {
-                "reserved": f'SUMIFS({base},{order_range("status")},"<>تم التوصيل",{order_range("status")},"<>ملغي",{order_range("status")},"<>مرتجع")',
-                "delivered": f'SUMIFS({base},{order_range("status")},"تم التوصيل")',
-                "returned_unsellable": f'SUMIFS({base},{order_range("status")},"مرتجع",{order_range("returned_sellable")},"<>نعم")',
-                "available": f'{c("opening_stock")}+{c("added_stock")}-{c("reserved")}-{c("delivered")}-{c("returned_unsellable")}',
-                "variance": f'IF({c("physical_count")}="","",{c("physical_count")}-({c("opening_stock")}+{c("added_stock")}-{c("delivered")}-{c("returned_unsellable")}))',
-                "low_stock": f'IF({c("available")}<={c("reorder_point")},"اطلب تصنيع جديد","مطمئن")',
-                "value": f'{c("available")}*{c("unit_cost")}',
-            }
+            sku = str(record.get("sku", "")).casefold()
+            expressions = {}
+            if sku in {"honey", "date"}:
+                quantity = "honey_qty" if sku == "honey" else "date_qty"
+                base = f'{order_range(quantity)},{order_range("order_id")},"<>",{order_range("order_id")},"<>مثال-احذفه"'
+                expressions = {
+                    "reserved": f'SUMIFS({base},{order_range("status")},"<>تم التوصيل",{order_range("status")},"<>ملغي",{order_range("status")},"<>مرتجع")',
+                    "delivered": f'SUMIFS({base},{order_range("status")},"تم التوصيل")',
+                    "returned_unsellable": f'SUMIFS({base},{order_range("status")},"مرتجع",{order_range("returned_sellable")},"<>نعم")',
+                    "available": f'{c("opening_stock")}+{c("added_stock")}-{c("reserved")}-{c("delivered")}-{c("returned_unsellable")}',
+                    "variance": f'IF({c("physical_count")}="","",{c("physical_count")}-({c("opening_stock")}+{c("added_stock")}-{c("delivered")}-{c("returned_unsellable")}))',
+                    "low_stock": f'IF({c("available")}<={c("reorder_point")},"اطلب تصنيع جديد","مطمئن")',
+                    "value": f'{c("available")}*{c("unit_cost")}',
+                }
             for key, col in ic.items():
                 value = record.get(key)
                 if key in expressions:

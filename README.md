@@ -21,10 +21,11 @@ For development with an existing Python 3.12 installation:
 ```powershell
 py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements-lock.txt
+.\.venv\Scripts\python.exe scripts\upgrade_database.py
 .\.venv\Scripts\python.exe -m streamlit run app.py
 ```
 
-The server binds to `127.0.0.1` by default. This MVP is for a trusted local team; it does not implement remote user accounts or internet deployment.
+The local server binds to `127.0.0.1` by default. Hosted mode uses OIDC accounts and PostgreSQL as described in the deployment guide.
 
 ## Daily use
 
@@ -34,6 +35,8 @@ The server binds to `127.0.0.1` by default. This MVP is for a trusted local team
 4. Open a result to update delivery, collection, feedback, or notes. Delivered orders require their actual delivery date. Cancellation and returns retain the order and its history.
 5. Record additions and physical counts in **المخزون**. Physical counts are observations, not automatic stock adjustments. Reserved units are still physically on hand until delivery.
 6. Record or edit feedback and issue follow-up in **الفيدباك**. Store the existing Google Form URL in settings and copy it from the interface. No Google Form API connection is used.
+
+Administrators can add a flavor or product from **المخزون → إضافة نكهة / منتج جديد**. Each product has a stable English SKU, Arabic display name, opening stock, unit cost, and reorder level. Active products appear automatically in order forms. A product can be stopped for new orders without removing it from historical orders.
 
 All successful changes are committed to the database before export. When Excel is open and blocks saving, the order is still saved. Close Excel and click **إعادة محاولة مزامنة Excel**. Settings also offers an immediate full export, the last successful sync time, and a workbook download.
 
@@ -53,10 +56,10 @@ Administrators can also update existing orders through Excel. Download the lates
 ## Calculation and workflow decisions
 
 - Initial prices: standard EGP 75 per cup; two-cup offer EGP 120 (EGP 60 per cup); sample product price zero. The offer applies EGP 60 to each cup, including odd quantities, as requested.
-- Initial unit costs: EGP 44 for both flavors. These intentionally override the old template's EGP 40.70 / 41.80 values.
+- Initial unit costs: EGP 44 for both supplied flavors. Each added product has its own unit cost managed from the inventory page.
 - Initial stock: 238 honey and milk, 250 date molasses and milk; reorder point 50 each.
 - Each order stores its price and product-cost snapshots. Changing settings affects new orders, while historical orders retain their agreed economics.
-- Total due = products − discount + customer delivery fee. Product cost = flavor quantities × their frozen unit costs. Contribution = total due − product cost − actual delivery cost. Outstanding = total due − amount collected. Overpayment appears as a negative outstanding amount.
+- Total due = products − discount + customer delivery fee. Product cost = each product quantity × its frozen unit cost. Contribution = total due − product cost − actual delivery cost. Outstanding = total due − amount collected. Overpayment appears as a negative outstanding amount.
 - An explicit refund amount distinguishes a returned order from an actually refunded payment. Original amount collected is retained; a fully refunded collected payment displays **مسترد**. Outstanding follows the specified gross formula; refunds are recorded separately.
 - Active orders reserve stock. Delivered units reduce physical on-hand stock. Cancelled orders release reservations. Returned units remain unavailable unless the operator explicitly confirms they are sellable. Previously delivered or returned orders cannot be cancelled to bypass this confirmation.
 - Negative stock is blocked unless the operator authenticates as administrator and supplies an audit reason. The override is disabled until `ADMIN_PIN` is configured.
@@ -95,7 +98,7 @@ EasyOats_Order_App/
 ├── app.py                     # Arabic Streamlit entry point
 ├── constants.py               # Arabic domain labels and initial settings
 ├── database.py                # SQLAlchemy connection and transactions
-├── models.py                  # Orders, inventory, feedback, settings, audit, sync
+├── models.py                  # Orders, line items, products, feedback, settings, audit, sync
 ├── pages/                     # Complete interface pages and shared UI
 ├── assets/                    # RTL responsive styling
 ├── services/

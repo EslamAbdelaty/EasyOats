@@ -14,7 +14,7 @@ import streamlit as st
 from constants import (
     ACTIVE_STATUSES, BUY_AGAIN_OPTIONS, FEEDBACK_CONSENTS, FEEDBACK_SOURCES,
     FEEDBACK_STATUSES, FOLLOWUP_STATUSES, ORDER_STATUSES, ORDER_TYPES,
-    PAYMENT_METHODS, PRODUCTS, SOURCES,
+    PAYMENT_METHODS, SOURCES,
 )
 from pages.ui import (
     after_save, as_date, audit_rows, date_label, details, empty, flash, go,
@@ -42,7 +42,7 @@ def _inventory_card(item: dict, compact: bool = False) -> None:
     total = max(int(item.get("opening_stock", 0)) + int(item.get("added_stock", 0)), 1)
     percentage = max(0, min(100, available / total * 100))
     st.markdown(
-        f'<div class="inventory-flavor"><span class="flavor-dot {flavor}"></span>{safe(PRODUCTS.get(item["sku"], item["name"]))}</div>'
+        f'<div class="inventory-flavor"><span class="flavor-dot {flavor}"></span>{safe(item["name"])}</div>'
         f'<div class="inventory-number">{number(available)} <span class="hint">كوب متاح للبيع</span></div>'
         f'<div class="stock-track"><div class="stock-fill" style="width:{percentage:.1f}%"></div></div>',
         unsafe_allow_html=True,
@@ -200,6 +200,7 @@ def new_order(service: Any) -> None:
     page_heading("طلب جديد", "سجّل تفاصيل العميل والطلب، وسنحسب الإجماليات ونحدّث المخزون تلقائيًا.")
     flash()
     settings = service.get_settings()
+    products = [item for item in service.inventory() if item.get("active", True)]
     generation = st.session_state.get("new_order_generation", 0)
     prefix = f"new_{generation}"
     main, summary = st.columns([2.2, 1])
@@ -218,11 +219,17 @@ def new_order(service: Any) -> None:
             location = st.text_input("رابط الموقع / خرائط جوجل", key=f"{prefix}_location", placeholder="https://maps.google.com/…")
         with st.container(border=True):
             st.subheader("٢ · المنتجات والسعر")
-            a, b, c = st.columns([1.2, 1, 1])
-            with a:
-                order_type = select("نوع الطلب", ORDER_TYPES, key=f"{prefix}_type")
-            honey = b.number_input("عسل ولبن · أكواب", min_value=0, step=1, value=1, key=f"{prefix}_honey")
-            dates = c.number_input("دبس تمر ولبن · أكواب", min_value=0, step=1, value=0, key=f"{prefix}_date")
+            order_type = select("نوع الطلب", ORDER_TYPES, key=f"{prefix}_type")
+            quantities = {}
+            for index in range(0, len(products), 2):
+                columns = st.columns(2)
+                for column, product_index in zip(columns, range(index, min(index + 2, len(products)))):
+                    product = products[product_index]
+                    quantities[product["sku"]] = column.number_input(
+                        f'{product["name"]} · وحدات', min_value=0, step=1,
+                        value=1 if product_index == 0 else 0,
+                        key=f'{prefix}_product_{product["sku"]}',
+                    )
             a, b, c = st.columns(3)
             discount = a.number_input("الخصم · ج.م", min_value=0.0, step=5.0, key=f"{prefix}_discount")
             delivery_fee = b.number_input("رسوم التوصيل على العميل · ج.م", min_value=0.0, step=5.0, key=f"{prefix}_delivery_fee")
@@ -254,11 +261,13 @@ def new_order(service: Any) -> None:
                 sellable = st.checkbox("المرتجع صالح للبيع وإعادته للمخزون", key=f"{prefix}_sellable") if status == "مرتجع" else False
             override, reason, pin = _override_controls(prefix)
 
-    units = honey + dates
+    units = sum(quantities.values())
     unit_price = 0 if order_type == "عينة" else float(settings["offer_price"]) / 2 if order_type == "عرض 2 بـ120" else float(settings["retail_price"])
     subtotal = units * unit_price
     total_due = subtotal - discount + delivery_fee
-    product_cost = honey * float(settings["honey_unit_cost"]) + dates * float(settings["date_unit_cost"])
+    product_cost = sum(
+        quantities[product["sku"]] * float(product["unit_cost"]) for product in products
+    )
     with summary:
         st.markdown('<div class="section-title">ملخص الطلب</div>', unsafe_allow_html=True)
         st.markdown(f'<div class="summary-box"><div class="hint">إجمالي المطلوب من العميل</div><div class="summary-total">{money(total_due)} <span class="hint">ج.م</span></div></div>', unsafe_allow_html=True)
@@ -271,8 +280,8 @@ def new_order(service: Any) -> None:
             ("هامش المساهمة التقديري", f"{money(total_due - product_cost - delivery_cost)} ج.م"),
         ])
         st.write("")
-        for item in service.inventory():
-            st.caption(f'{PRODUCTS.get(item["sku"], item["name"])}: {number(item["available"])} كوب متاح')
+        for item in products:
+            st.caption(f'{item["name"]}: {number(item["available"])} وحدة متاحة')
         st.caption("يُنشأ رقم طلب ثابت تلقائيًا عند الحفظ، وتُحدّث نسخة Excel مباشرة.")
         if st.button("حفظ الطلب", type="primary", width="stretch", key="save_new_order"):
             if not _authorize(service, override, reason, pin):
@@ -280,7 +289,7 @@ def new_order(service: Any) -> None:
             data = {
                 "customer_name": name, "phone_original": phone, "order_datetime": datetime.combine(ordered_date, ordered_time),
                 "source": source, "area": area, "address": address, "location_url": location,
-                "order_type": order_type, "honey_qty": honey, "date_qty": dates, "discount": discount,
+                "order_type": order_type, "product_quantities": quantities, "discount": discount,
                 "delivery_fee": delivery_fee, "delivery_cost": delivery_cost, "payment_method": payment_method,
                 "amount_collected": collected, "status": status, "courier": courier,
                 "expected_delivery_date": expected, "actual_delivery_date": actual, "tracking_number": tracking,
@@ -324,8 +333,7 @@ def _order_card(service: Any, order: dict, allow_open: bool = True) -> None:
             details([
                 ("تاريخ الطلب", date_label(order.get("order_datetime"), True)),
                 ("رقم الموبايل", order.get("phone_original")), ("رقم البحث", order.get("phone_normalized")),
-                ("عسل ولبن", f'{number(order.get("honey_qty"))} كوب'),
-                ("دبس تمر ولبن", f'{number(order.get("date_qty"))} كوب'),
+                ("المنتجات", order.get("products_summary") or "طلب خاص دون وحدات"),
                 ("نوع الطلب", order.get("order_type")), ("مصدر الطلب", order.get("source")),
             ])
         with b:
@@ -452,6 +460,23 @@ def update_order(service: Any) -> None:
             st.warning("أدخل تاريخ التوصيل الفعلي لإتمام الحفظ.")
 
     with st.container(border=True):
+        st.subheader("المنتجات والكميات")
+        current_quantities = order.get("product_quantities", {})
+        available_products = service.inventory()
+        shown_products = [item for item in available_products
+                          if item.get("active", True) or current_quantities.get(item["sku"], 0)]
+        product_quantities = {}
+        for index in range(0, len(shown_products), 2):
+            columns = st.columns(2)
+            for column, product in zip(columns, shown_products[index:index + 2]):
+                product_quantities[product["sku"]] = column.number_input(
+                    f'{product["name"]} · وحدات', min_value=0, step=1,
+                    value=int(current_quantities.get(product["sku"], 0)),
+                    key=f'{prefix}_product_{product["sku"]}',
+                    disabled=not product.get("active", True) and not current_quantities.get(product["sku"], 0),
+                )
+
+    with st.container(border=True):
         st.subheader("الفيدباك والمتابعة")
         a, b, c = st.columns(3)
         with a:
@@ -483,6 +508,7 @@ def update_order(service: Any) -> None:
                 "returned_sellable": sellable, "payment_method": payment_method, "amount_collected": collected,
                 "refund_amount": refund, "feedback_consent": consent, "feedback_status": feedback_status,
                 "feedback_request_date": requested, "customer_rating": rating, "buy_again": buy_again,
+                "product_quantities": product_quantities,
             }, user=user_name(), override_reason=reason if override else None, is_admin=override)
             st.session_state["update_generation"] = generation + 1
             after_save(f"تم تحديث الطلب {oid} وحفظ سجل التعديلات.", service)
@@ -496,27 +522,75 @@ def update_order(service: Any) -> None:
 def inventory_page(service: Any) -> None:
     page_heading("المخزون", "راقب الكميات المتاحة والمحجوزة، وسجّل الإضافات ونتيجة الجرد.")
     flash()
+    hosted = bool(st.session_state.get("auth_mode"))
+    is_admin = not hosted or st.session_state.get("auth_role") == "admin"
+    if is_admin:
+        with st.expander("إضافة نكهة / منتج جديد"):
+            with st.form("new_product_form", clear_on_submit=True):
+                a, b = st.columns(2)
+                product_name = a.text_input("اسم المنتج *", placeholder="مثال: شوكولاتة ولبن")
+                product_sku = b.text_input("كود المنتج *", placeholder="chocolate", help="حروف إنجليزية صغيرة وأرقام فقط، ويمكن استخدام - و _.")
+                a, b, c = st.columns(3)
+                product_opening = a.number_input("الرصيد الافتتاحي", min_value=0, step=1)
+                product_cost = b.number_input("تكلفة الوحدة · ج.م", min_value=0.0, step=1.0)
+                product_reorder = c.number_input("حد إعادة الطلب", min_value=0, value=50, step=1)
+                add_product = st.form_submit_button("إضافة المنتج", type="primary", width="stretch")
+            if add_product:
+                try:
+                    product = service.create_product(
+                        {"name": product_name, "sku": product_sku, "opening_stock": product_opening,
+                         "unit_cost": product_cost, "reorder_point": product_reorder},
+                        user=user_name(),
+                        actor_email=st.session_state.get("auth_email") if hosted else None,
+                        is_admin=is_admin,
+                    )
+                    after_save(f'تمت إضافة المنتج {product["name"]}.', service)
+                    st.rerun()
+                except Exception as exc:
+                    show_error(exc)
     items = service.inventory()
-    columns = st.columns(2)
-    for column, item in zip(columns, items):
-        sku = item["sku"]
-        with column, st.container(border=True):
-            _inventory_card(item)
-            with st.expander("تحديث الرصيد والجرد"):
-                with st.form(f"inventory_form_{sku}"):
-                    opening = st.number_input("الرصيد الافتتاحي · كوب", min_value=0, value=int(item.get("opening_stock", 0)), step=1, key=f"stock_{sku}_opening")
-                    added = st.number_input("إجمالي المخزون المضاف · كوب", min_value=0, value=int(item.get("added_stock", 0)), step=1, key=f"stock_{sku}_added", help="أدخل مجموع كل الإضافات منذ بداية التشغيل.")
-                    count_enabled = st.checkbox("تسجيل جرد فعلي", value=item.get("physical_count") is not None, key=f"stock_{sku}_count_enabled")
-                    physical = st.number_input("عدد الأكواب في الجرد الفعلي", min_value=0, value=int(item.get("physical_count") or 0), step=1, key=f"stock_{sku}_physical")
-                    reorder = st.number_input("حد إعادة الطلب · كوب", min_value=0, value=int(item.get("reorder_point", 50)), step=1, key=f"stock_{sku}_reorder")
-                    saved = st.form_submit_button("حفظ بيانات المخزون", width="stretch", type="primary")
-                if saved:
-                    try:
-                        service.update_inventory(sku, {"opening_stock": opening, "added_stock": added, "physical_count": physical if count_enabled else None, "reorder_point": reorder}, user=user_name())
-                        after_save(f'تم تحديث مخزون {PRODUCTS.get(sku, item["name"])}.', service)
-                        st.rerun()
-                    except Exception as exc:
-                        show_error(exc)
+    for offset in range(0, len(items), 2):
+        for column, item in zip(st.columns(2), items[offset:offset + 2]):
+            sku = item["sku"]
+            with column, st.container(border=True):
+                _inventory_card(item)
+                if not item.get("active", True):
+                    st.caption("هذا المنتج متوقف ولا يظهر في الطلبات الجديدة.")
+                with st.expander("تحديث الرصيد والجرد"):
+                    with st.form(f"inventory_form_{sku}"):
+                        opening = st.number_input("الرصيد الافتتاحي · وحدة", min_value=0, value=int(item.get("opening_stock", 0)), step=1, key=f"stock_{sku}_opening")
+                        added = st.number_input("إجمالي المخزون المضاف · وحدة", min_value=0, value=int(item.get("added_stock", 0)), step=1, key=f"stock_{sku}_added", help="أدخل مجموع كل الإضافات منذ بداية التشغيل.")
+                        count_enabled = st.checkbox("تسجيل جرد فعلي", value=item.get("physical_count") is not None, key=f"stock_{sku}_count_enabled")
+                        physical = st.number_input("عدد الوحدات في الجرد الفعلي", min_value=0, value=int(item.get("physical_count") or 0), step=1, key=f"stock_{sku}_physical")
+                        reorder = st.number_input("حد إعادة الطلب · وحدة", min_value=0, value=int(item.get("reorder_point", 50)), step=1, key=f"stock_{sku}_reorder")
+                        saved = st.form_submit_button("حفظ بيانات المخزون", width="stretch", type="primary")
+                    if saved:
+                        try:
+                            service.update_inventory(sku, {"opening_stock": opening, "added_stock": added, "physical_count": physical if count_enabled else None, "reorder_point": reorder}, user=user_name())
+                            after_save(f'تم تحديث مخزون {item["name"]}.', service)
+                            st.rerun()
+                        except Exception as exc:
+                            show_error(exc)
+                if is_admin:
+                    with st.expander("إعدادات المنتج"):
+                        with st.form(f"product_definition_{sku}"):
+                            definition_name = st.text_input("اسم المنتج", value=item["name"], key=f"definition_{sku}_name")
+                            definition_cost = st.number_input("تكلفة الوحدة · ج.م", min_value=0.0, value=float(item["unit_cost"]), step=1.0, key=f"definition_{sku}_cost")
+                            definition_active = st.checkbox("المنتج نشط ويظهر في الطلبات الجديدة", value=bool(item.get("active", True)), key=f"definition_{sku}_active")
+                            save_definition = st.form_submit_button("حفظ إعدادات المنتج", width="stretch")
+                        if save_definition:
+                            try:
+                                service.update_product_definition(
+                                    sku,
+                                    {"name": definition_name, "unit_cost": definition_cost, "active": definition_active},
+                                    user=user_name(),
+                                    actor_email=st.session_state.get("auth_email") if hosted else None,
+                                    is_admin=is_admin,
+                                )
+                                after_save(f'تم تحديث إعدادات {definition_name}.', service)
+                                st.rerun()
+                            except Exception as exc:
+                                show_error(exc)
     st.info("الطلبات النشطة تحجز الكمية تلقائيًا. الإلغاء يحرّر الحجز، والمرتجع يعود للمخزون عند تأكيد صلاحيته للبيع.")
     st.caption("الجرد الفعلي يقارن رصيد المستودع الفعلي بالرصيد المتوقع، بما فيه الكميات المحجوزة التي لم تُسلَّم بعد. لا يغيّر تسجيل الجرد الرصيد تلقائيًا.")
     st.markdown('<div class="section-title">الطلبات التي تحجز مخزونًا</div>', unsafe_allow_html=True)
@@ -612,15 +686,12 @@ def settings_page(service: Any) -> None:
             st.info("يمكن للمسؤول فقط تغيير الأسعار والتكاليف وصلاحيات الفريق.")
         else:
             with st.form("settings_form"):
-                st.subheader("الأسعار والتكاليف")
+                st.subheader("أسعار البيع")
                 a, b = st.columns(2)
                 retail = a.number_input("سعر الكوب العادي · ج.م", min_value=0.0, value=float(settings["retail_price"]), step=5.0, key="settings_retail")
                 offer = b.number_input("سعر عرض كوبين · ج.م", min_value=0.0, value=float(settings["offer_price"]), step=5.0, key="settings_offer")
-                a, b = st.columns(2)
-                honey_cost = a.number_input("تكلفة كوب عسل ولبن · ج.م", min_value=0.0, value=float(settings["honey_unit_cost"]), step=1.0, key="settings_honey_cost")
-                date_cost = b.number_input("تكلفة كوب دبس تمر ولبن · ج.م", min_value=0.0, value=float(settings["date_unit_cost"]), step=1.0, key="settings_date_cost")
                 threshold = st.number_input("حد تنبيه انخفاض المخزون الافتراضي · كوب", min_value=0, value=int(settings.get("low_stock_threshold", 50)), step=1, key="settings_threshold")
-                st.caption("تُطبق الأسعار والتكاليف الجديدة على الطلبات الجديدة؛ يحتفظ الطلب السابق بأسعاره وتكاليفه عند الإنشاء. تحديث حد التنبيه الافتراضي يطبّقه على المنتجين.")
+                st.caption("تُطبق أسعار البيع الجديدة على الطلبات الجديدة. تُدار تكلفة كل منتج من صفحة المخزون، ويحتفظ الطلب السابق بسعره وتكاليفه وقت الإنشاء.")
                 st.subheader("استبيان الفيدباك")
                 form_url = st.text_input("رابط استبيان جوجل", value=settings.get("google_form_url") or "", placeholder="https://forms.gle/…", key="settings_form_url", help="يمكن نسخ الرابط ومشاركته مع العملاء الموافقين على الفيدباك.")
                 names = settings.get("user_names") or ["فريق EasyOats"]
@@ -637,7 +708,7 @@ def settings_page(service: Any) -> None:
             if saved:
                 try:
                     names_list = list(dict.fromkeys(n.strip() for n in user_names.splitlines() if n.strip()))
-                    service.update_settings({"retail_price": retail, "offer_price": offer, "honey_unit_cost": honey_cost, "date_unit_cost": date_cost,
+                    service.update_settings({"retail_price": retail, "offer_price": offer,
                                              "low_stock_threshold": threshold, "google_form_url": form_url,
                                              "user_names": names_list, "current_user": current_name}, user=user_name())
                     after_save("تم حفظ إعدادات العمل.", service)
@@ -711,7 +782,8 @@ def settings_page(service: Any) -> None:
         )
         st.caption(
             "لا تغيّر أرقام الطلبات أو أسماء الأوراق والأعمدة. الحقول المحسوبة مثل الإجمالي والمتبقي "
-            "وحالة الدفع يعيد التطبيق حسابها تلقائياً."
+            "وحالة الدفع يعيد التطبيق حسابها تلقائياً. كميات النكهات والمنتجات المضافة تُعدّل من داخل "
+            "التطبيق، بينما يعرضها ملف Excel ضمن تفاصيل المنتجات والإجماليات."
         )
         if not is_admin:
             st.info("استيراد تعديلات Excel متاح لمسؤول النظام فقط.")
