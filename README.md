@@ -2,7 +2,7 @@
 
 An Arabic, right-to-left order manager for EasyOats. The database is the source of truth—SQLite locally and PostgreSQL when hosted—and the supplied Excel workbook is a synchronized operational report. The interface covers orders, customer history, delivery, collection, inventory, feedback, and export.
 
-The project also includes a production multi-user path using managed PostgreSQL, Google/Microsoft OIDC sign-in, staff/admin roles, versioned migrations, and durable hosted Excel storage. Follow [DEPLOYMENT.md](DEPLOYMENT.md) for the exact cutover procedure.
+The project also includes multi-user deployment paths using managed PostgreSQL, Google/Microsoft OIDC sign-in, staff/admin roles, and versioned migrations. Follow [DEPLOYMENT.md](DEPLOYMENT.md) for Render or [NEON_STREAMLIT_DEPLOYMENT.md](NEON_STREAMLIT_DEPLOYMENT.md) for the free Neon and Streamlit Community Cloud path.
 
 ## Start on Windows
 

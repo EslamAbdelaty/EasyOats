@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from services.order_service import AppService
+from scripts.migrate_postgres_to_postgres import main as migrate_postgres
 from scripts.migrate_sqlite_to_postgres import main as migrate
 
 
@@ -44,6 +45,37 @@ def test_sqlite_transfer_preserves_records_and_ids(tmp_path, monkeypatch):
             "feedback_consent": "موافق",
         })
         assert second["order_id"] == "EO-000002"
+        assert migrated.sync_status()["pending"] is True
+    finally:
+        migrated.engine.dispose()
+
+
+def test_database_to_database_transfer_uses_guarded_verified_copy(tmp_path, monkeypatch):
+    source = tmp_path / "hosted-source.db"
+    target = tmp_path / "neon-target.db"
+    original = AppService(database_url=f"sqlite:///{source.as_posix()}", auto_sync=False)
+    order = original.create_order({
+        "customer_name": "عميل Neon", "phone_original": "01098765432",
+        "order_datetime": datetime(2026, 10, 6, 10), "source": "واتساب",
+        "order_type": "سعر عادي", "honey_qty": 1, "date_qty": 1,
+        "payment_method": "كاش", "status": "جديد",
+        "feedback_consent": "موافق",
+    })
+    original.engine.dispose()
+
+    monkeypatch.setenv("EASYOATS_TEST_ALLOW_SQLITE_TARGET", "1")
+    source_url = f"sqlite:///{source.as_posix()}"
+    target_url = f"sqlite:///{target.as_posix()}"
+    assert migrate_postgres([
+        "--source-url", source_url, "--target-url", target_url, "--dry-run",
+    ]) == 0
+    assert migrate_postgres([
+        "--source-url", source_url, "--target-url", target_url,
+    ]) == 0
+
+    migrated = AppService(database_url=target_url, auto_sync=False)
+    try:
+        assert migrated.get_order(order["order_id"])["customer_name"] == "عميل Neon"
         assert migrated.sync_status()["pending"] is True
     finally:
         migrated.engine.dispose()

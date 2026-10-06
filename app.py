@@ -18,6 +18,7 @@ st.set_page_config(
 )
 
 from services.order_service import AppService
+from scripts.upgrade_database import main as upgrade_database
 from pages.ui import date_label, safe, show_error
 from pages.views import PAGE_RENDERERS
 
@@ -26,6 +27,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 
 @st.cache_resource
 def get_service() -> AppService:
+    # Streamlit Community Cloud starts the Python entrypoint directly, so it
+    # has no separate pre-start command in which to run Alembic.  Keep the
+    # schema current once per app process before constructing the service.
+    upgrade_database()
     return AppService()
 
 

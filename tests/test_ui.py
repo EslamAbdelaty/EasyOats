@@ -1,5 +1,8 @@
 from pathlib import Path
+import sqlite3
 
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from streamlit.testing.v1 import AppTest
 
 
@@ -19,3 +22,6 @@ def test_all_seven_pages_render_in_local_mode(tmp_path, monkeypatch):
     for page in pages:
         app.radio(key="navigation").set_value(page).run(timeout=20)
         assert not app.exception, (page, [str(error.value) for error in app.exception])
+    expected_revision = ScriptDirectory.from_config(Config(root / "alembic.ini")).get_current_head()
+    with sqlite3.connect(tmp_path / "ui.db") as connection:
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone()[0] == expected_revision

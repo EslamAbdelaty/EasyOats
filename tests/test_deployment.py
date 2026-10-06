@@ -48,3 +48,14 @@ def test_render_blueprint_wires_postgres_auth_and_persistent_excel():
     assert "key: BOOTSTRAP_ADMIN_EMAILS\n        sync: false" in blueprint
     assert "mountPath: /var/data" in blueprint
     assert "healthCheckPath: /_stcore/health" in blueprint
+
+
+def test_streamlit_cloud_secret_template_uses_neon_and_temporary_excel_paths():
+    root = Path(__file__).resolve().parents[1]
+    template = (root / ".streamlit" / "secrets.example.toml").read_text(encoding="utf-8")
+    assert "-pooler." in template
+    assert "sslmode=require" in template
+    assert 'AUTH_REQUIRED = "true"' in template
+    assert 'EXCEL_PATH = "/tmp/easyoats/EasyOats_Order_Tracker.xlsx"' in template
+    assert "[auth]" in template
+    assert ".streamlit.app/oauth2callback" in template

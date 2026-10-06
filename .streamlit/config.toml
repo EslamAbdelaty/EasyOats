@@ -5,10 +5,5 @@ secondaryBackgroundColor = "#F0ECDD"
 textColor = "#183D2C"
 font = "sans serif"
 
-[server]
-address = "127.0.0.1"
-port = 8501
-headless = false
-
 [browser]
 gatherUsageStats = false

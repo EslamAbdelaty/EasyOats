@@ -115,6 +115,9 @@ def copy_rows(source_url: str, target_url: str) -> dict[str, int]:
         copied: dict[str, int] = {}
         expected_counts: dict[str, int] = {}
         with source_engine.connect() as source, target_engine.begin() as target:
+            if source_engine.dialect.name == "postgresql":
+                # All source tables must come from one stable cutover snapshot.
+                source.exec_driver_sql("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             if seed_only:
                 # A first Render boot creates only these defaults. Replacing them
                 # is safe because revision zero and an empty audit log prove that
