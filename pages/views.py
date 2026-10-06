@@ -159,22 +159,22 @@ def dashboard(service: Any) -> None:
     _orders_table(orders[:8])
 
 
-def _override_controls(prefix: str) -> tuple[bool, str, str]:
+def _override_controls(prefix: str, *, batched: bool = False) -> tuple[bool, str, str]:
     with st.expander("تجاوز المخزون بصلاحية مسؤول"):
         if st.session_state.get("auth_mode"):
             if st.session_state.get("auth_role") != "admin":
                 st.caption("تجاوز المخزون متاح للمسؤولين فقط.")
                 return False, "", ""
             enabled = st.checkbox("السماح بتجاوز الكمية المتاحة لهذا التعديل", key=f"{prefix}_override")
-            reason = st.text_input("سبب التجاوز (إلزامي)", key=f"{prefix}_override_reason", disabled=not enabled)
+            reason = st.text_input("سبب التجاوز (إلزامي)", key=f"{prefix}_override_reason", disabled=not enabled and not batched)
             st.caption("سيُسجل حساب المسؤول وسبب التجاوز في سجل التعديلات.")
             return enabled, reason, ""
         if not os.getenv("ADMIN_PIN"):
             st.caption("تجاوز المخزون غير مفعّل. يمكن للمسؤول تفعيله من إعدادات تشغيل التطبيق.")
             return False, "", ""
         enabled = st.checkbox("السماح بتجاوز الكمية المتاحة لهذا التعديل", key=f"{prefix}_override")
-        reason = st.text_input("سبب التجاوز (إلزامي)", key=f"{prefix}_override_reason", disabled=not enabled)
-        pin = st.text_input("رمز المسؤول", type="password", key=f"{prefix}_admin_pin", disabled=not enabled)
+        reason = st.text_input("سبب التجاوز (إلزامي)", key=f"{prefix}_override_reason", disabled=not enabled and not batched)
+        pin = st.text_input("رمز المسؤول", type="password", key=f"{prefix}_admin_pin", disabled=not enabled and not batched)
         st.caption("يُسجل اسم المستخدم وسبب التجاوز في سجل التعديلات.")
         return enabled, reason, pin
 
@@ -204,14 +204,13 @@ def new_order(service: Any) -> None:
     generation = st.session_state.get("new_order_generation", 0)
     prefix = f"new_{generation}"
     main, summary = st.columns([2.2, 1])
-    with main:
+    with main, st.form(f"{prefix}_form", enter_to_submit=False):
         with st.container(border=True):
             st.subheader("١ · بيانات العميل")
             a, b = st.columns(2)
             name = a.text_input("اسم العميل *", key=f"{prefix}_customer_name", placeholder="الاسم بالكامل")
             phone = b.text_input("رقم الموبايل *", key=f"{prefix}_phone", placeholder="01012345678", help="نقبل الصيغ المصرية المحلية والدولية مثل +201012345678.")
             a, b = st.columns(2)
-            source = select("مصدر الطلب", SOURCES, key=f"{prefix}_source") if False else None
             with a:
                 source = select("مصدر الطلب", SOURCES, key=f"{prefix}_source")
             area = b.text_input("المنطقة", key=f"{prefix}_area", placeholder="مثال: مدينة نصر")
@@ -249,17 +248,17 @@ def new_order(service: Any) -> None:
             with a:
                 expected = optional_date("موعد التوصيل المتوقع", None, f"{prefix}_expected")
             tracking = b.text_input("رقم التتبع / المرجع", key=f"{prefix}_tracking")
-            actual = None
-            if status == "تم التوصيل":
-                actual = optional_date("تاريخ التوصيل الفعلي *", None, f"{prefix}_actual")
+            actual = optional_date("تاريخ التوصيل الفعلي (مطلوب عند التسليم)", None, f"{prefix}_actual")
             a, b = st.columns(2)
             ordered_date = a.date_input("تاريخ الطلب", value=date.today(), format="YYYY/MM/DD", key=f"{prefix}_order_date")
             ordered_time = b.time_input("وقت الطلب", value=datetime.now().time().replace(second=0, microsecond=0), key=f"{prefix}_order_time")
             with st.expander("الفيدباك والملاحظات", expanded=True):
                 consent = select("موافقة العميل على الفيدباك", FEEDBACK_CONSENTS, key=f"{prefix}_consent")
                 notes = st.text_area("ملاحظات الطلب", key=f"{prefix}_notes", height=85)
-                sellable = st.checkbox("المرتجع صالح للبيع وإعادته للمخزون", key=f"{prefix}_sellable") if status == "مرتجع" else False
-            override, reason, pin = _override_controls(prefix)
+                sellable = st.checkbox("المرتجع صالح للبيع وإعادته للمخزون", key=f"{prefix}_sellable")
+            override, reason, pin = _override_controls(prefix, batched=True)
+        st.caption("تُرسل البيانات ويُحدَّث Excel مرة واحدة عند حفظ الطلب. الملخص يعرض آخر بيانات أُرسلت.")
+        submitted = st.form_submit_button("حفظ الطلب", type="primary", width="stretch", key="save_new_order")
 
     units = sum(quantities.values())
     unit_price = 0 if order_type == "عينة" else float(settings["offer_price"]) / 2 if order_type == "عرض 2 بـ120" else float(settings["retail_price"])
@@ -283,7 +282,7 @@ def new_order(service: Any) -> None:
         for item in products:
             st.caption(f'{item["name"]}: {number(item["available"])} وحدة متاحة')
         st.caption("يُنشأ رقم طلب ثابت تلقائيًا عند الحفظ، وتُحدّث نسخة Excel مباشرة.")
-        if st.button("حفظ الطلب", type="primary", width="stretch", key="save_new_order"):
+        if submitted:
             if not _authorize(service, override, reason, pin):
                 return
             data = {
