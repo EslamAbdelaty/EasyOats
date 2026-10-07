@@ -24,6 +24,7 @@ from xml.etree import ElementTree as ET
 from zipfile import ZipFile
 
 from filelock import FileLock, Timeout
+from constants import PAYMENT_METHODS
 from openpyxl import load_workbook
 from openpyxl.chart.data_source import NumData, NumVal, StrData, StrVal
 from openpyxl.packaging.custom import IntProperty
@@ -377,6 +378,10 @@ class ExcelService:
         old_ends = {ws.title: ws.max_row, fs.title: fs.max_row}
         oe, fe = max(ws.max_row, oh + len(orders)), max(fs.max_row, fh + len(feedback))
         _expand_sheet(ws, oh, oe)
+        payment_cell = f'{get_column_letter(oc["payment_method"])}{oh + 1}'
+        for validation in ws.data_validations.dataValidation:
+            if validation.type == "list" and payment_cell in validation:
+                validation.formula1 = '"' + ",".join(PAYMENT_METHODS) + '"'
         _expand_sheet(fs, fh, fe)
         _expand_sheet(ins, ih, max(ins.max_row, ih + len(inventory)))
         caches = {s.title: {} for s in workbook}
