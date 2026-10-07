@@ -1,8 +1,22 @@
 from datetime import datetime
+import logging
 
 from services.order_service import AppService
 from scripts.migrate_postgres_to_postgres import main as migrate_postgres
 from scripts.migrate_sqlite_to_postgres import main as migrate
+from scripts.upgrade_database import main as upgrade_database
+
+
+def test_startup_migrations_preserve_application_error_logging(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{(tmp_path / 'startup.db').as_posix()}")
+    loggers = [logging.getLogger("easyoats.ui"), logging.getLogger("services.order_service")]
+    for logger in loggers:
+        monkeypatch.setattr(logger, "disabled", False)
+
+    # Startup upgrades both a new database and an already migrated database.
+    for _ in range(2):
+        assert upgrade_database() == 0
+        assert all(not logger.disabled for logger in loggers)
 
 
 def test_sqlite_transfer_preserves_records_and_ids(tmp_path, monkeypatch):

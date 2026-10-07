@@ -9,7 +9,8 @@ from models import Base
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # Migrations also run during app startup; preserve UI and service error logs.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 url = (config.attributes.get("connection_url") or os.getenv("DATABASE_URL")
        or config.get_main_option("sqlalchemy.url"))
